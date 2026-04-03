@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "consumer-dispute-mcp"
+version = "0.1.0"
+description = "소비자분쟁해결기준 MCP 서버 - 법제처 데이터 기반"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "mcp",
+    "httpx",
+    "beautifulsoup4",
+    "lxml",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[project.scripts]
+consumer-dispute-mcp = "consumer_dispute_mcp.server:main"
