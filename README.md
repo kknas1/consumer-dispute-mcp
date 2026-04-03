@@ -21,7 +21,6 @@
 ```
 consumer-dispute-mcp/
 ├── README.md                   # 이 파일
-├── README.md
 ├── pyproject.toml
 ├── src/
 │   └── consumer_dispute_mcp/
