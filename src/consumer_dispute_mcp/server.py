@@ -95,6 +95,69 @@ def get_law_version() -> str:
     return data.meta.model_dump_json(indent=2)
 
 
+@mcp.tool()
+def get_warranty_period(query: str) -> str:
+    """품목의 품질보증기간 및 부품보유기간을 조회합니다.
+
+    Args:
+        query: 검색할 품목명 (예: "자동차", "TV", "스마트폰")
+    """
+    data = _load_data()
+    if data is None:
+        return "데이터가 아직 준비되지 않았습니다."
+
+    results = []
+    for info in data.warranty_info:
+        if query in info.item:
+            results.append(info.model_dump())
+
+    if not results:
+        return f"'{query}'에 해당하는 품질보증기간 정보를 찾지 못했습니다."
+    return json.dumps(results, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def get_useful_life(query: str) -> str:
+    """품목의 내용연수(감가상각 기준 수명)를 조회합니다.
+
+    Args:
+        query: 검색할 품목명 (예: "냉장고", "노트북", "휴대폰")
+    """
+    data = _load_data()
+    if data is None:
+        return "데이터가 아직 준비되지 않았습니다."
+
+    results = []
+    for info in data.useful_life_info:
+        if query in info.items:
+            results.append(info.model_dump())
+
+    if not results:
+        return f"'{query}'에 해당하는 내용연수 정보를 찾지 못했습니다."
+    return json.dumps(results, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def get_target_products(query: str) -> str:
+    """대상품목 목록에서 특정 업종/품종의 해당 품목을 조회합니다.
+
+    Args:
+        query: 검색할 업종 또는 품종명 (예: "전자제품", "란류", "식료품")
+    """
+    data = _load_data()
+    if data is None:
+        return "데이터가 아직 준비되지 않았습니다."
+
+    results = []
+    for tp in data.target_products:
+        if query in tp.industry or query in tp.category or query in tp.products:
+            results.append(tp.model_dump())
+
+    if not results:
+        return f"'{query}'에 해당하는 대상품목을 찾지 못했습니다."
+    return json.dumps(results, ensure_ascii=False, indent=2)
+
+
 def main() -> None:
     mcp.run()
 

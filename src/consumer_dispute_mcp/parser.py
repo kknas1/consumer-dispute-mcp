@@ -24,6 +24,9 @@ from consumer_dispute_mcp.models import (
     DisputeData,
     DisputeItem,
     Meta,
+    TargetProduct,
+    UsefulLifeInfo,
+    WarrantyInfo,
 )
 
 BASE_URL = "http://www.law.go.kr/DRF"
@@ -292,6 +295,232 @@ def _merge_items(items: list[DisputeItem]) -> list[DisputeItem]:
     return list(merged.values())
 
 
+# ── 별표 I: 대상품목 파싱 ─────────────────────────────
+
+
+def parse_target_products(xml_text: str) -> list[TargetProduct]:
+    """별표 I(대상품목) 텍스트 테이블을 파싱한다.
+
+    테이블 구조: 번호 │ 업종 │ 품종 │ 해당 품목
+    """
+    soup = BeautifulSoup(xml_text, "lxml-xml")
+    tables = soup.find_all("별표단위")
+    if len(tables) < 1:
+        return []
+
+    content = tables[0].find("별표내용").get_text()
+    lines = content.split("\n")
+
+    results: list[TargetProduct] = []
+    current_industry = ""
+    current_category = ""
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("┃"):
+            continue
+        # 대분류 행 (Ⅰ. <상품(재화) 부문>) 스킵
+        if "<" in stripped or "부문>" in stripped:
+            continue
+        # 헤더 행 스킵
+        if "업" in stripped[:20] and "종" in stripped[:20] and "품" in stripped[:30]:
+            continue
+
+        inner = _strip_box(stripped)
+        parts = inner.split("│")
+        parts = [p.strip() for p in parts]
+
+        if len(parts) >= 4:
+            # 번호│업종│품종│해당 품목
+            industry = _clean_text(parts[1]) or current_industry
+            category = _clean_text(parts[2])
+            products = _clean_text(parts[3])
+            if industry:
+                current_industry = industry
+        elif len(parts) >= 3:
+            # 업종 생략된 행: 빈│품종│해당 품목
+            industry = current_industry
+            category = _clean_text(parts[1]) or current_category
+            products = _clean_text(parts[2])
+        else:
+            continue
+
+        if category:
+            current_category = category
+
+        if category and products:
+            results.append(TargetProduct(
+                industry=current_industry,
+                category=category,
+                products=products,
+            ))
+
+    return results
+
+
+# ── 별표 III: 품질보증기간/부품보유기간 파싱 ─────────
+
+
+def parse_warranty_info(xml_text: str) -> list[WarrantyInfo]:
+    """별표 III(품목별 품질���증기간 및 부��보유기간) 텍스트 테이블을 파싱한다.
+
+    별표 III는 3개의 별도 테이블로 구성됨.
+    테이블 구조: 품목 │ 품질보증기간 │ 부품보유기간
+    """
+    soup = BeautifulSoup(xml_text, "lxml-xml")
+    tables = soup.find_all("별표단위")
+    if len(tables) < 3:
+        return []
+
+    content = tables[2].find("별표내용").get_text()
+    lines = content.split("\n")
+
+    results: list[WarrantyInfo] = []
+    current_item_parts: list[str] = []
+    current_warranty_parts: list[str] = []
+    current_parts_parts: list[str] = []
+    in_data = False
+
+    def _flush():
+        if current_item_parts:
+            item = _clean_text(" ".join(current_item_parts))
+            warranty = _clean_text(" ".join(current_warranty_parts))
+            parts_period = _clean_text(" ".join(current_parts_parts))
+            if item:
+                results.append(WarrantyInfo(
+                    item=item,
+                    warranty_period=warranty,
+                    parts_retention_period=parts_period,
+                ))
+
+    for line in lines:
+        stripped = line.strip()
+
+        # 헤더 행 (품목│품질보증기간 등) 스킵, 첫 ┠ 이후 데이터 시작
+        if stripped.startswith("┠"):
+            if in_data:
+                _flush()
+                current_item_parts = []
+                current_warranty_parts = []
+                current_parts_parts = []
+            else:
+                in_data = True
+            continue
+
+        # 테이블 끝 → flush 후 리셋 (다음 테이블 대비)
+        if stripped.startswith("┗"):
+            _flush()
+            current_item_parts = []
+            current_warranty_parts = []
+            current_parts_parts = []
+            in_data = False
+            continue
+
+        # 새 테이블 시작 (┏) → 헤더 행이 올 때까지 대기
+        if stripped.startswith("┏") or stripped.startswith("┣"):
+            in_data = False
+            continue
+
+        if not in_data:
+            # 헤더 행(품목│품질보증기간) 감지 → 다음 ┠에서 in_data=True
+            continue
+
+        # 데이터 행
+        if stripped.startswith("┃"):
+            inner = _strip_box(stripped)
+            parts = inner.split("│")
+            parts = [p.strip() for p in parts]
+            if len(parts) >= 1 and parts[0]:
+                current_item_parts.append(_clean_text(parts[0]))
+            if len(parts) >= 2 and parts[1]:
+                current_warranty_parts.append(_clean_text(parts[1]))
+            if len(parts) >= 3 and parts[2]:
+                current_parts_parts.append(_clean_text(parts[2]))
+
+    return results
+
+
+# ── 별표 IV: 품목별 내용연수표 파싱 ──────────────────
+
+
+def parse_useful_life(xml_text: str) -> list[UsefulLifeInfo]:
+    """별표 IV(품목별 내용연수표) 텍스트 테이블을 파싱한다.
+
+    테이블 구조: 품목 │ 내용연수
+    내용연수 컬럼은 rowspan으로 하나의 큰 셀이므로, 전체 텍스트를 모아서 각 품목에 공통 적용.
+    """
+    soup = BeautifulSoup(xml_text, "lxml-xml")
+    tables = soup.find_all("별표단위")
+    if len(tables) < 4:
+        return []
+
+    content = tables[3].find("별표내용").get_text()
+    lines = content.split("\n")
+
+    # 먼저 내용연수 컬럼의 전체 텍스트를 수집 (rowspan 셀)
+    life_text_parts: list[str] = []
+    in_data = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("┠") and not in_data:
+            in_data = True
+            continue
+        if not in_data:
+            continue
+        if stripped.startswith("┗"):
+            break
+        if stripped.startswith("┃"):
+            inner = _strip_box(stripped)
+            parts = inner.split("│")
+            if len(parts) >= 2 and parts[1].strip():
+                life_text_parts.append(_clean_text(parts[1]))
+
+    useful_life_default = _clean_text(" ".join(life_text_parts))
+
+    # 품목별 행 파싱
+    results: list[UsefulLifeInfo] = []
+    current_items_parts: list[str] = []
+    in_data = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("┠") and not in_data:
+            in_data = True
+            continue
+        if not in_data:
+            continue
+
+        if stripped.startswith("┠"):
+            if current_items_parts:
+                items_text = _clean_text(" ".join(current_items_parts))
+                if items_text:
+                    results.append(UsefulLifeInfo(
+                        items=items_text,
+                        useful_life=useful_life_default,
+                    ))
+            current_items_parts = []
+            continue
+
+        if stripped.startswith("┗"):
+            if current_items_parts:
+                items_text = _clean_text(" ".join(current_items_parts))
+                if items_text:
+                    life = "5년" if "별도" in items_text else useful_life_default
+                    results.append(UsefulLifeInfo(
+                        items=items_text,
+                        useful_life=life,
+                    ))
+            break
+
+        if stripped.startswith("┃"):
+            inner = _strip_box(stripped)
+            parts = inner.split("│")
+            if len(parts) >= 1 and parts[0].strip():
+                current_items_parts.append(_clean_text(parts[0]))
+
+    return results
+
+
 # ── 데이터 저장 ───────────────────────────────────────
 
 
@@ -322,14 +551,24 @@ async def fetch_and_parse(api_key: str | None = None) -> DisputeData:
     latest = max(rules, key=lambda r: r.get("enforce_date", ""))
 
     xml_text = await fetch_admin_rule_body_xml(latest["lsi_seq"], api_key)
+
     items = parse_dispute_tables(xml_text)
+    target_products = parse_target_products(xml_text)
+    warranty_info = parse_warranty_info(xml_text)
+    useful_life_info = parse_useful_life(xml_text)
 
     meta = Meta(
         version=latest.get("enforce_date", ""),
         announcement_no=latest.get("announcement_no", ""),
         fetched_at=datetime.now(timezone.utc),
     )
-    return DisputeData(meta=meta, items=items)
+    return DisputeData(
+        meta=meta,
+        items=items,
+        target_products=target_products,
+        warranty_info=warranty_info,
+        useful_life_info=useful_life_info,
+    )
 
 
 # ── 유틸 ─────────────────────────────────────────────
